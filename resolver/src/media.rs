@@ -36,7 +36,7 @@ fn range(value: &str) -> Option<(u64, u64)> {
     (end >= start).then_some((start, end))
 }
 
-fn content_range(value: &str) -> Option<(u64, u64, u64)> {
+pub fn content_range(value: &str) -> Option<(u64, u64, u64)> {
     let (bounds, size) = value.strip_prefix("bytes ")?.split_once('/')?;
     let (start, end) = bounds.split_once('-')?;
     let (start, end, size) = (start.parse().ok()?, end.parse().ok()?, size.parse().ok()?);
@@ -64,15 +64,17 @@ pub async fn relay(
             .and_then(range)
             .ok_or(StatusCode::RANGE_NOT_SATISFIABLE)?
     };
-    let mut request = client
-        .get(url)
-        .header(RANGE, format!("bytes={start}-{requested_end}"))
-        .header(ACCEPT_ENCODING, "identity")
-        .timeout(Duration::from_secs(20));
-    for (name, value) in media.headers {
-        request = request.header(name, value);
+    let mut upstream = request_range(client, &url, &media.headers, start, requested_end).await?;
+    if !head
+        && requested_end - start >= 512 * 1024
+        && upstream.status() != StatusCode::PARTIAL_CONTENT
+        && upstream.status() != StatusCode::RANGE_NOT_SATISFIABLE
+    {
+        // Some mirrors only honor shorter ranges, even when a seekable probe succeeds.
+        drop(upstream);
+        upstream =
+            request_range(client, &url, &media.headers, start, start + 512 * 1024 - 1).await?;
     }
-    let upstream = request.send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
     let upstream_headers = upstream.headers();
     if upstream.status() == StatusCode::RANGE_NOT_SATISFIABLE {
         let mut response = Response::new(Body::empty());
@@ -83,29 +85,40 @@ pub async fn relay(
         return Ok(response);
     }
     let retryable = StatusCode::BAD_GATEWAY;
-    if upstream.status() != StatusCode::PARTIAL_CONTENT {
-        return Err(retryable);
+    let upstream_status = upstream.status();
+    let failure = |reason| {
+        eprintln!("media relay: {reason}; upstream status={upstream_status}");
+        retryable
+    };
+    if upstream_status != StatusCode::PARTIAL_CONTENT {
+        return Err(failure("range rejected"));
     }
     let mime = upstream_headers
         .get(CONTENT_TYPE)
         .filter(|value| value.to_str().ok().is_some_and(media_type))
-        .ok_or(retryable)?;
-    let bounds = upstream_headers.get(CONTENT_RANGE).ok_or(retryable)?;
+        .ok_or_else(|| failure("unsupported media type"))?;
+    let bounds = upstream_headers
+        .get(CONTENT_RANGE)
+        .ok_or_else(|| failure("missing Content-Range"))?;
     let (served_start, served_end, size) = bounds
         .to_str()
         .ok()
         .and_then(content_range)
-        .ok_or(retryable)?;
-    if served_start != start || served_end != requested_end.min(size - 1) {
-        return Err(retryable);
+        .ok_or_else(|| failure("invalid Content-Range"))?;
+    if served_start != start || served_end > requested_end {
+        return Err(failure("unexpected range bounds"));
     }
     let size = if head {
         size
     } else {
         served_end - served_start + 1
     };
-    if !head && upstream.content_length() != Some(size) {
-        return Err(retryable);
+    if !head
+        && upstream
+            .content_length()
+            .is_some_and(|length| length != size)
+    {
+        return Err(failure("range length differs from Content-Length"));
     }
     let mut response = Response::builder()
         .status(if head {
@@ -124,12 +137,41 @@ pub async fn relay(
         Body::empty()
     } else {
         use futures::StreamExt;
+        let mut remaining = size;
         Body::from_stream(upstream.bytes_stream().map(move |chunk| {
             let _hold_permit = &permit;
-            chunk
+            let chunk = chunk.map_err(std::io::Error::other)?;
+            remaining = remaining
+                .checked_sub(chunk.len() as u64)
+                .ok_or_else(|| std::io::Error::other("CDN exceeded its declared range"))?;
+            Ok::<_, std::io::Error>(chunk)
         }))
     };
     response.body(body).map_err(|_| retryable)
+}
+
+async fn request_range(
+    client: &Client,
+    url: &Url,
+    headers: &[(String, String)],
+    start: u64,
+    end: u64,
+) -> Result<reqwest::Response, StatusCode> {
+    let mut request = client
+        .get(url.clone())
+        .header(RANGE, format!("bytes={start}-{end}"))
+        .header(ACCEPT_ENCODING, "identity")
+        .timeout(Duration::from_secs(10));
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    request.send().await.map_err(|error| {
+        eprintln!(
+            "media relay: upstream request failed; timed out={}",
+            error.is_timeout()
+        );
+        StatusCode::BAD_GATEWAY
+    })
 }
 
 #[cfg(test)]

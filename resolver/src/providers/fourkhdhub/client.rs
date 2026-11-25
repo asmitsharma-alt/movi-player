@@ -182,19 +182,19 @@ impl FourKHdHubClient {
     async fn probe(
         &self,
         url: &str,
-        headers: Vec<(String, String)>,
+        mut headers: Vec<(String, String)>,
         origin: &str,
     ) -> Option<PlaybackSource> {
         use reqwest::header::*;
         let initial = Url::parse(url).ok().filter(crate::net::valid_url)?;
+        headers.push(("Origin".into(), origin.to_owned()));
         tokio::time::timeout(std::time::Duration::from_millis(3500), async {
             let mut target = initial;
             for _ in 0..2 {
                 let mut request = self
                     .client
                     .get(target.clone())
-                    .header(RANGE, "bytes=0-8191")
-                    .header(ORIGIN, origin)
+                    .header(RANGE, "bytes=0-4194303")
                     .header(ACCEPT_ENCODING, "identity");
                 for (name, value) in &headers {
                     request = request.header(name, value);
@@ -214,13 +214,13 @@ impl FourKHdHubClient {
                 }
                 if !crate::media::media_type(&mime)
                     || response.status() != reqwest::StatusCode::PARTIAL_CONTENT
-                    || !response
-                        .headers()
-                        .get(CONTENT_RANGE)?
-                        .to_str()
-                        .ok()?
-                        .starts_with("bytes 0-")
                 {
+                    return None;
+                }
+                let (start, end, size) = crate::media::content_range(
+                    response.headers().get(CONTENT_RANGE)?.to_str().ok()?,
+                )?;
+                if start != 0 || end != (4 * 1024 * 1024 - 1).min(size - 1) {
                     return None;
                 }
                 let allowed = response
