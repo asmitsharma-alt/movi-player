@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Sign in · Movi Player</title>
+  <link rel="stylesheet" href="/movies.css">
+</head>
+<body>
+  <main class="login">
+    <a class="wordmark" href="/movies">Movi Player</a>
+    <h1>Sign in</h1>
+    <!-- LOGIN_ERROR -->
+    <form action="/sign-in" method="post">
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" maxlength="80" required>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" maxlength="128" required>
+      <button class="primary">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>

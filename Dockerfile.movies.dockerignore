@@ -1,0 +1,9 @@
+**
+!resolver/
+!resolver/**
+resolver/target
+!app/
+!app/movies.html
+!app/movies-login.html
+!app/movies.css
+!app/movies.js

@@ -40,10 +40,13 @@ const DRIVE_WITH_VERSION = bake(DRIVE_HTML);
 // client-side Turnstile flow stays inert (matches the server falling
 // open when TURNSTILE_SECRET_KEY isn't set).
 function buildHtml(env) {
-  return HTML_WITH_VERSION.replace(
-    /__TURNSTILE_SITE_KEY__/g,
-    env.TURNSTILE_SITE_KEY || "",
-  );
+  const preview = URL.parse(env.MOVIES_PREVIEW_URL || "");
+  const moviesLink = preview?.protocol === "https:"
+    ? '<li class="nav-link-movies"><a href="' + escapeEmbedAttr(new URL("/movies", preview).href) + '">Movies</a></li>'
+    : "";
+  return HTML_WITH_VERSION
+    .replace(/__TURNSTILE_SITE_KEY__/g, env.TURNSTILE_SITE_KEY || "")
+    .replace("<!--__MOVIES_LINK__-->", () => moviesLink);
 }
 
 // The Drive app's Google credentials are injected per-request from env so they

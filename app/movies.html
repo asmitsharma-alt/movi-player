@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Movies · Movi Player</title>
+  <link rel="stylesheet" href="/movies.css">
+  <script type="module" src="/movies.js"></script>
+</head>
+<body>
+  <header class="top">
+    <a class="wordmark" href="/movies">Movi Player</a>
+    <form action="/sign-out" method="post"><button class="quiet">Sign out</button></form>
+  </header>
+  <main>
+    <h1>Movies</h1>
+    <form id="search" role="search">
+      <label for="query">Search for a movie</label>
+      <div class="search-row">
+        <input id="query" name="q" type="search" minlength="2" maxlength="120" placeholder="Enter a movie title" required>
+        <button class="primary">Search</button>
+      </div>
+    </form>
+    <p id="search-status" class="status" role="status"></p>
+    <ul id="movies" class="posters" aria-label="Movie results"></ul>
+    <section id="details" aria-labelledby="movie-title" hidden>
+      <button id="back" class="quiet">Back to results</button>
+      <h2 id="movie-title" tabindex="-1"></h2>
+      <p id="release-status" class="status" role="status"></p>
+      <div id="playback" hidden>
+        <p id="play-status" class="status" role="status"></p>
+        <div id="player-stage"></div>
+      </div>
+      <ul id="releases" class="releases" aria-label="Available releases"></ul>
+    </section>
+  </main>
+</body>
+</html>
