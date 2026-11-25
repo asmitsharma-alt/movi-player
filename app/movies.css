@@ -63,3 +63,15 @@ movi-player { display: block; width: 100%; aspect-ratio: 16 / 9; max-height: 75v
 .login h1 { margin-top: 2rem; }
 .login input { margin-bottom: 1rem; }
 .login [role=alert] { color: #ffc5b5; }
+
+.player-options { display: flex; align-items: center; gap: .65rem; margin-bottom: .9rem; }
+.player-options label { margin: 0; }
+.player-options select {
+  font: inherit;
+  color: inherit;
+  border: 1px solid var(--line);
+  border-radius: .5rem;
+  background: var(--panel);
+  padding: .45rem .65rem;
+}
+#player-stage video { display: block; width: 100%; aspect-ratio: 16 / 9; max-height: 75vh; background: #080b10; }

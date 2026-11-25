@@ -10,6 +10,12 @@ const playback = document.querySelector("#playback");
 const playStatus = document.querySelector("#play-status");
 const stage = document.querySelector("#player-stage");
 const lighterButton = document.querySelector("#lighter-release");
+const playerChoice = document.querySelector("#player-choice");
+const shakaAudio = {
+  container: document.querySelector("#shaka-audio"),
+  input: document.querySelector("#shaka-audio-track"),
+};
+if (localStorage.getItem("movi-preview-player") === "shaka") playerChoice.value = "shaka";
 
 let searchTimer;
 let searchRequest;
@@ -22,6 +28,8 @@ let activeReleases = [];
 let playerModule;
 let selectedPoster;
 let playNonce = 0;
+let activePlayback;
+let shakaModule;
 
 async function api(path, options) {
   const response = await fetch(path, options);
@@ -48,6 +56,22 @@ function preloadPlayer() {
   });
   return playerModule;
 }
+
+function prepareEngine(kind) {
+  if (kind === "shaka") {
+    shakaModule ??= import("/movies-shaka.js");
+    return shakaModule.then(async (adapter) => ({ adapter, library: await adapter.preloadShaka() }));
+  }
+  return preloadPlayer().then((module) => module.loadWasmModule?.());
+}
+
+playerChoice.addEventListener("change", () => {
+  localStorage.setItem("movi-preview-player", playerChoice.value);
+  void prepareEngine(playerChoice.value).catch(() => {});
+  if (!activePlayback) return;
+  const { movie, release, player, startAt, autoStart } = activePlayback;
+  play(movie, release, player?.currentTime || startAt, player && activePlayback.ready ? !player.paused : autoStart);
+});
 
 function getPlayback(releaseId, signal, previous) {
   return api("/api/playback", {
@@ -179,7 +203,7 @@ async function openMovie(movie, poster) {
   movieTitle.focus();
   releaseList.replaceChildren();
   releaseStatus.textContent = "Loading releases…";
-  preloadPlayer().then((module) => module.loadWasmModule?.()).catch(() => {});
+  void prepareEngine(playerChoice.value).catch(() => {});
   try {
     const releases = await api(`/api/movies/${encodeURIComponent(movie.id)}/releases`, { signal: request.signal });
     if (request.signal.aborted) return;
@@ -205,6 +229,7 @@ document.querySelector("#back").addEventListener("click", () => {
   warmRequest?.abort();
   clearTimeout(hoverTimer);
   playNonce++;
+  activePlayback = undefined;
   stage.replaceChildren();
   playback.hidden = true;
   displaySearch(true);
@@ -228,16 +253,24 @@ function lighterRelease(current) {
     ))[0];
 }
 
-async function play(movie, release, startAt = 0) {
+async function play(movie, release, startAt = 0, autoStart = true) {
   playerRequest?.abort();
   const request = new AbortController();
   playerRequest = request;
   const run = ++playNonce;
   const started = performance.now();
+  const kind = playerChoice.value;
+  const engine = prepareEngine(kind);
+  // The resolver can finish after a failed bundle load.
+  void engine.catch(() => {});
+  const current = { movie, release, startAt, autoStart, player: null, ready: false };
+  activePlayback = current;
   let firstFrame = false;
   let sameSourceRelayUsed = false;
   let alternateUsed = false;
   let refreshed = false;
+  let endAttempt;
+  request.signal.addEventListener("abort", () => endAttempt?.(), { once: true });
   const lighter = lighterRelease(release);
 
   playback.hidden = false;
@@ -247,67 +280,108 @@ async function play(movie, release, startAt = 0) {
   playback.scrollIntoView({ block: "nearest" });
 
   async function attach(source, url = source.url, resumeAt = 0) {
-    await preloadPlayer();
+    const prepared = await engine;
     if (request.signal.aborted) return;
-    const player = element("movi-player");
+    endAttempt?.();
+    const player = element(kind === "shaka" ? "video" : "movi-player");
+    current.player = player;
+    current.ready = false;
     player.setAttribute("controls", "");
-    player.setAttribute("autoplay", "");
     player.setAttribute("playsinline", "");
-    player.setAttribute("title", movie.title);
-    player.setAttribute("smoothwarning", "");
-    if (/\.mp4$/i.test(release.filename) && /^h\.?264$/i.test(release.codec ?? "")
-      && release.language && !/[,/+|]|multi|dual/i.test(release.language)) {
-      player.setAttribute("engine", "native wasm");
+    player.setAttribute("aria-label", movie.title);
+    if (kind === "movi") {
+      player.setAttribute("title", movie.title);
+      player.setAttribute("smoothwarning", "");
+      if (/\.mp4$/i.test(release.filename) && /^h\.?264$/i.test(release.codec ?? "")
+        && release.language && !/[,/+|]|multi|dual/i.test(release.language)) {
+        player.setAttribute("engine", "native wasm");
+      }
+      if (resumeAt > 0) player.setAttribute("startat", String(resumeAt));
     }
+
+    let session;
+    let playingTimer;
     let bufferingTimer;
+    let ended = false;
+    let recovering = false;
+    const active = () => !ended && !request.signal.aborted && player.isConnected;
     const offerLighter = () => {
-      if (!lighter || request.signal.aborted || !player.isConnected) return;
+      if (!lighter || !active()) return;
       lighterButton.textContent = lighter.quality
         ? `Switch to a lighter ${lighter.quality} release`
         : "Switch to a lighter release";
       lighterButton.hidden = false;
       lighterButton.onclick = () => play(movie, lighter, Number(player.currentTime) || resumeAt);
     };
+    const buffer = (isBuffering) => {
+      clearTimeout(bufferingTimer);
+      if (isBuffering) bufferingTimer = setTimeout(offerLighter, 3000);
+    };
+    const readyTimer = setTimeout(() => {
+      if (!active()) return;
+      playStatus.textContent = "Still opening this video. You can try another release or player.";
+      offerLighter();
+    }, 10000);
+    endAttempt = () => {
+      ended = true;
+      clearTimeout(readyTimer);
+      clearTimeout(bufferingTimer);
+      clearInterval(playingTimer);
+      session?.dispose();
+    };
+
     player.addEventListener("smoothwarning", (event) => {
       if (!lighter) return;
       event.preventDefault();
       offerLighter();
     });
     player.addEventListener("statechange", (event) => {
-      clearTimeout(bufferingTimer);
-      const state = event.detail?.state ?? event.detail;
-      if (state === "buffering") bufferingTimer = setTimeout(offerLighter, 3000);
+      buffer((event.detail?.state ?? event.detail) === "buffering");
     });
-    request.signal.addEventListener("abort", () => clearTimeout(bufferingTimer), { once: true });
-    if (resumeAt > 0) player.setAttribute("startat", String(resumeAt));
-    const readyTimer = setTimeout(() => {
-      if (player.isConnected && !request.signal.aborted) {
-        playStatus.textContent = "Still opening this video. You can choose another release below.";
-      }
-    }, 10000);
-    request.signal.addEventListener("abort", () => clearTimeout(readyTimer), { once: true });
+    player.addEventListener("waiting", () => buffer(true));
+    player.addEventListener("playing", () => buffer(false));
     player.addEventListener("loadeddata", () => {
       clearTimeout(readyTimer);
-      if (request.signal.aborted) return;
+      if (!active()) return;
+      current.ready = true;
       if (!firstFrame) {
         firstFrame = true;
         performance.measure(`movi:play-to-first-frame:${run}`, { start: started, end: performance.now() });
       }
       playStatus.textContent = "";
-      queueMicrotask(() => {
-        if (!player.isConnected || request.signal.aborted || !player.paused) return;
-        Promise.resolve(player.play()).catch(() => {
-          if (player.isConnected && !request.signal.aborted) playStatus.textContent = "Press Play to start.";
-        });
-      });
+      if (kind === "movi" && autoStart) queueMicrotask(start);
     }, { once: true });
-    player.addEventListener("play", () => {
-      if (player.isConnected && !request.signal.aborted) playStatus.textContent = "";
-    });
-    player.addEventListener("error", async () => {
+
+    function start() {
+      if (!active() || !player.paused) return;
+      Promise.resolve(player.play()).catch(() => {
+        if (active()) playStatus.textContent = "Press Play to start.";
+      });
+    }
+
+    let previousTime = resumeAt;
+    let stalledSamples = 0;
+    playingTimer = setInterval(() => {
+      if (!active() || player.paused || player.seeking) {
+        stalledSamples = 0;
+        return;
+      }
+      const time = Number(player.currentTime);
+      stalledSamples = time <= previousTime ? stalledSamples + 1 : 0;
+      if (stalledSamples === 3) offerLighter();
+      previousTime = time;
+    }, 1250);
+
+    async function recover(error) {
+      if (!active() || recovering) return;
+      recovering = true;
       clearTimeout(readyTimer);
-      if (request.signal.aborted || !player.isConnected) return;
       const position = Number(player.currentTime) || resumeAt;
+      if (error?.incompatible) {
+        playStatus.textContent = error.message;
+        offerLighter();
+        return;
+      }
       try {
         playStatus.textContent = "Retrying this release…";
         if (url !== source.relayUrl && !sameSourceRelayUsed) {
@@ -323,15 +397,28 @@ async function play(movie, release, startAt = 0) {
           const alternate = await getPlayback(release.id, request.signal, source.token);
           await attach({ ...alternate, receivedAt: Date.now() }, alternate.url, position);
         } else {
-          playStatus.textContent = "This release could not play in your browser. Try another release below.";
+          playStatus.textContent = "This release could not play in your browser. Try another release or player.";
+          offerLighter();
         }
-      } catch (error) {
-        if (!request.signal.aborted) playStatus.textContent = error.message;
+      } catch (failure) {
+        if (!request.signal.aborted) playStatus.textContent = failure.message;
       }
-    }, { once: true });
+    }
+
     playStatus.textContent = "Opening video…";
-    player.setAttribute("src", url);
     stage.replaceChildren(player);
+    if (kind === "shaka") {
+      try {
+        session = prepared.adapter.shakaSession(prepared.library, player, shakaAudio, recover);
+        await session.load(url, resumeAt, release.filename);
+        if (autoStart && !recovering) start();
+      } catch (error) {
+        await recover(error);
+      }
+    } else {
+      player.addEventListener("error", recover, { once: true });
+      player.setAttribute("src", url);
+    }
   }
 
   try {

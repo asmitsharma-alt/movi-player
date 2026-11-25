@@ -230,6 +230,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             }),
         )
+        .route(
+            "/movies-shaka.js",
+            get(|| async {
+                (
+                    [(CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../app/movies-shaka.js"),
+                )
+            }),
+        )
         .route("/api/movies", get(search))
         .route("/api/movies/{id}/releases", get(releases))
         .route("/api/playback", post(playback))

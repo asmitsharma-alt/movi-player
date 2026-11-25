@@ -7,3 +7,4 @@ resolver/target
 !app/movies-login.html
 !app/movies.css
 !app/movies.js
+!app/movies-shaka.js

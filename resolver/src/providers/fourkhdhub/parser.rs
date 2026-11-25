@@ -253,21 +253,31 @@ fn parse_season_episode(value: &str) -> Option<(usize, usize)> {
 
 fn detect_quality(value: &str) -> Option<String> {
     let lower = value.to_ascii_lowercase();
-    if lower.contains("2160p")
-        || lower.contains("2160")
-        || lower.contains("4k")
-        || lower.contains("uhd")
-    {
-        Some("2160p".to_string())
-    } else if lower.contains("1080p") || lower.contains("1080") || lower.contains("fhd") {
-        Some("1080p".to_string())
-    } else if lower.contains("720p") || lower.contains("720") || lower.contains("hd") {
-        Some("720p".to_string())
-    } else if lower.contains("480p") || lower.contains("480") || lower.contains("sd") {
-        Some("480p".to_string())
-    } else {
-        None
-    }
+    let tokens = lower.split(|c: char| !c.is_ascii_alphanumeric());
+    let explicit = tokens.clone().find_map(|token| match token {
+        "4320" | "4320p" => Some("4320p"),
+        "2160" | "2160p" => Some("2160p"),
+        "1440" | "1440p" => Some("1440p"),
+        "1080" | "1080p" => Some("1080p"),
+        "720" | "720p" => Some("720p"),
+        "480" | "480p" => Some("480p"),
+        "360" | "360p" => Some("360p"),
+        _ => None,
+    });
+    explicit
+        .or_else(|| {
+            tokens
+                .filter_map(|token| match token {
+                    "8k" => Some("4320p"),
+                    "4k" | "uhd" => Some("2160p"),
+                    "fhd" => Some("1080p"),
+                    "hd" => Some("720p"),
+                    "sd" => Some("480p"),
+                    _ => None,
+                })
+                .next()
+        })
+        .map(str::to_owned)
 }
 
 fn detect_codec(value: &str) -> Option<String> {
@@ -469,6 +479,11 @@ mod tests {
         );
         assert_eq!(detect_quality("Film.720p.HD.x264").as_deref(), Some("720p"));
         assert_eq!(detect_quality("Old.Show.480p.SD").as_deref(), Some("480p"));
+        assert_eq!(
+            detect_quality("Dune (2021) 1080p BluRay x265 4KHDHub.com.mkv").as_deref(),
+            Some("1080p")
+        );
+        assert_eq!(detect_quality("Dune.4KHDHub.com.mkv"), None);
         assert_eq!(detect_quality("Unknown.Release.Title"), None);
     }
 }

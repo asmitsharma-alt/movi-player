@@ -4,10 +4,16 @@ RUN mkdir /assets && cd /assets && npm pack movi-player@0.4.1 --quiet \
     && rm movi-player-0.4.1.tgz \
     && gzip -k element.js movi.wasm
 
+RUN cd /assets && npm pack shaka-player@5.3.6 --quiet \
+    && tar -xzf shaka-player-5.3.6.tgz --strip-components=2 package/dist/shaka-player.experimental.js \
+    && tar -xOzf shaka-player-5.3.6.tgz package/LICENSE > SHAKA-LICENSE.txt \
+    && rm shaka-player-5.3.6.tgz \
+    && gzip -k shaka-player.experimental.js
+
 FROM rust:1.90-bookworm AS build
 WORKDIR /src
 COPY resolver ./resolver
-COPY app/movies.html app/movies-login.html app/movies.css app/movies.js ./app/
+COPY app/movies.html app/movies-login.html app/movies.css app/movies.js app/movies-shaka.js ./app/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/resolver/target \
     cargo build --locked --release --manifest-path resolver/Cargo.toml \
