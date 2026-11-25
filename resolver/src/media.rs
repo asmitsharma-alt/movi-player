@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 const MAX_RANGE: u64 = 8 * 1024 * 1024;
+const OPENING_RANGE: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Media {
@@ -45,6 +46,7 @@ pub fn content_range(value: &str) -> Option<(u64, u64, u64)> {
 
 pub async fn relay(
     client: &Client,
+    range_limits: &moka::future::Cache<String, u64>,
     media: Media,
     method: Method,
     headers: &HeaderMap,
@@ -64,17 +66,33 @@ pub async fn relay(
             .and_then(range)
             .ok_or(StatusCode::RANGE_NOT_SATISFIABLE)?
     };
-    let mut upstream = request_range(client, &url, &media.headers, start, requested_end).await?;
-    if !head
-        && requested_end - start >= 512 * 1024
-        && upstream.status() != StatusCode::PARTIAL_CONTENT
-        && upstream.status() != StatusCode::RANGE_NOT_SATISFIABLE
-    {
-        // Some mirrors only honor shorter ranges, even when a seekable probe succeeds.
-        drop(upstream);
-        upstream =
-            request_range(client, &url, &media.headers, start, start + 512 * 1024 - 1).await?;
-    }
+    let cached_limit = if head {
+        MAX_RANGE
+    } else {
+        range_limits.get(&media.target).await.unwrap_or(MAX_RANGE)
+    };
+    let mut size_limit = (requested_end - start + 1).min(cached_limit);
+    let upstream = loop {
+        let result =
+            request_range(client, &url, &media.headers, start, start + size_limit - 1).await;
+        match result {
+            Ok(response)
+                if response.status() == StatusCode::PARTIAL_CONTENT
+                    || response.status() == StatusCode::RANGE_NOT_SATISFIABLE
+                    || size_limit <= 512 * 1024 =>
+            {
+                break response;
+            }
+            Err(error) if size_limit <= 512 * 1024 => return Err(error),
+            _ => {
+                size_limit = if size_limit > OPENING_RANGE {
+                    OPENING_RANGE
+                } else {
+                    512 * 1024
+                }
+            }
+        }
+    };
     let upstream_headers = upstream.headers();
     if upstream.status() == StatusCode::RANGE_NOT_SATISFIABLE {
         let mut response = Response::new(Body::empty());
@@ -120,6 +138,9 @@ pub async fn relay(
     {
         return Err(failure("range length differs from Content-Length"));
     }
+    if !head && size_limit < cached_limit && size_limit < requested_end - start + 1 {
+        range_limits.insert(media.target, size_limit).await;
+    }
     let mut response = Response::builder()
         .status(if head {
             StatusCode::OK
@@ -161,17 +182,14 @@ async fn request_range(
         .get(url.clone())
         .header(RANGE, format!("bytes={start}-{end}"))
         .header(ACCEPT_ENCODING, "identity")
-        .timeout(Duration::from_secs(10));
+        .timeout(Duration::from_secs(19));
     for (name, value) in headers {
         request = request.header(name, value);
     }
-    request.send().await.map_err(|error| {
-        eprintln!(
-            "media relay: upstream request failed; timed out={}",
-            error.is_timeout()
-        );
-        StatusCode::BAD_GATEWAY
-    })
+    tokio::time::timeout(Duration::from_secs(4), request.send())
+        .await
+        .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
+        .map_err(|_| StatusCode::BAD_GATEWAY)
 }
 
 #[cfg(test)]

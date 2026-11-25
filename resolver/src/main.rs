@@ -40,6 +40,7 @@ struct App {
     searches: Cache<String, Vec<CatalogItem>>,
     releases: Cache<String, Vec<Release>>,
     resolved: Cache<ReleaseKey, PlaybackSource>,
+    relay_limits: Cache<String, u64>,
     login_attempts: Cache<String, Arc<std::sync::atomic::AtomicU32>>,
     requests: Arc<tokio::sync::Semaphore>,
 }
@@ -187,6 +188,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         resolved: Cache::builder()
             .max_capacity(64)
             .time_to_live(Duration::from_secs(25))
+            .build(),
+        relay_limits: Cache::builder()
+            .max_capacity(256)
+            .time_to_live(Duration::from_secs(900))
             .build(),
         login_attempts: Cache::builder()
             .max_capacity(128)
@@ -374,19 +379,25 @@ async fn releases(
     let releases = app.releases(movie.clone()).await?;
     let recommended = releases
         .iter()
-        .position(|release| {
-            release.quality.as_deref() == Some("1080p")
-                && release
-                    .codec
-                    .as_deref()
-                    .is_some_and(|codec| matches!(codec, "H.264" | "H264" | "x264" | "AVC"))
+        .enumerate()
+        .min_by_key(|(_, release)| {
+            let resolution = match release.quality.as_deref() {
+                Some("1080p") => 0,
+                Some("720p" | "480p" | "360p") => 1,
+                Some("2160p") => 2,
+                _ => 3,
+            };
+            let hardware_friendly = matches!(
+                release.codec.as_deref(),
+                Some("H.264" | "H264" | "x264" | "AVC")
+            );
+            (
+                resolution,
+                !hardware_friendly,
+                release.size_bytes.unwrap_or(u64::MAX),
+            )
         })
-        .or_else(|| {
-            releases
-                .iter()
-                .position(|release| release.quality.as_deref() == Some("1080p"))
-        })
-        .unwrap_or(0);
+        .map_or(0, |(index, _)| index);
     let cards = releases
         .into_iter()
         .enumerate()
@@ -522,7 +533,14 @@ async fn stream(
     let Ok(permit) = app.requests.clone().try_acquire_owned() else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
-    media::relay(app.provider.http(), media, method, &headers, permit)
-        .await
-        .unwrap_or_else(IntoResponse::into_response)
+    media::relay(
+        app.provider.http(),
+        &app.relay_limits,
+        media,
+        method,
+        &headers,
+        permit,
+    )
+    .await
+    .unwrap_or_else(IntoResponse::into_response)
 }

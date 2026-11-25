@@ -9,6 +9,7 @@ const releaseStatus = document.querySelector("#release-status");
 const playback = document.querySelector("#playback");
 const playStatus = document.querySelector("#play-status");
 const stage = document.querySelector("#player-stage");
+const lighterButton = document.querySelector("#lighter-release");
 
 let searchTimer;
 let searchRequest;
@@ -16,6 +17,8 @@ let detailRequest;
 let playerRequest;
 let warmRequest;
 let warmRelease;
+let hoverTimer;
+let activeReleases = [];
 let playerModule;
 let selectedPoster;
 let playNonce = 0;
@@ -116,6 +119,7 @@ query.addEventListener("input", () => {
 });
 
 function warm(release) {
+  if (warmRelease?.id === release.id && warmRelease.expiresAt > Date.now()) return;
   warmRequest?.abort();
   warmRequest = new AbortController();
   const entry = { id: release.id, expiresAt: Infinity };
@@ -123,7 +127,10 @@ function warm(release) {
   entry.result = getPlayback(release.id, warmRequest.signal).then((source) => {
     entry.expiresAt = Date.now() + source.expiresIn * 1000;
     return source;
-  }).catch(() => null);
+  }).catch(() => {
+    entry.expiresAt = 0;
+    return null;
+  });
 }
 
 function releaseRow(release, movie) {
@@ -138,7 +145,18 @@ function releaseRow(release, movie) {
   if (metadata) text.append(element("p", "release-info", metadata));
   const button = element("button", release.recommended ? "primary" : "", "Play");
   button.setAttribute("aria-label", `Play ${release.filename}`);
-  button.addEventListener("click", () => play(movie, release));
+  const deferWarm = () => {
+    clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(() => warm(release), 300);
+  };
+  button.addEventListener("pointerenter", deferWarm);
+  button.addEventListener("pointerleave", () => clearTimeout(hoverTimer));
+  button.addEventListener("focus", deferWarm);
+  button.addEventListener("blur", () => clearTimeout(hoverTimer));
+  button.addEventListener("click", () => {
+    clearTimeout(hoverTimer);
+    play(movie, release);
+  });
   row.append(text, button);
   return row;
 }
@@ -146,6 +164,8 @@ function releaseRow(release, movie) {
 async function openMovie(movie, poster) {
   detailRequest?.abort();
   warmRequest?.abort();
+  clearTimeout(hoverTimer);
+  activeReleases = [];
   const request = new AbortController();
   detailRequest = request;
   selectedPoster = poster;
@@ -158,6 +178,7 @@ async function openMovie(movie, poster) {
   try {
     const releases = await api(`/api/movies/${encodeURIComponent(movie.id)}/releases`, { signal: request.signal });
     if (request.signal.aborted) return;
+    activeReleases = releases;
     releaseStatus.textContent = releases.length ? "" : "No video releases are currently available.";
     releaseList.replaceChildren(...releases.map((release) => releaseRow(release, movie)));
     const recommended = releases.find((release) => release.recommended);
@@ -177,6 +198,7 @@ document.querySelector("#back").addEventListener("click", () => {
   detailRequest?.abort();
   playerRequest?.abort();
   warmRequest?.abort();
+  clearTimeout(hoverTimer);
   playNonce++;
   stage.replaceChildren();
   playback.hidden = true;
@@ -184,7 +206,24 @@ document.querySelector("#back").addEventListener("click", () => {
   selectedPoster?.focus();
 });
 
-async function play(movie, release) {
+function height(release) {
+  return Number.parseInt(release.quality, 10) || 0;
+}
+
+function lighterRelease(current) {
+  return activeReleases
+    .filter((candidate) => candidate.id !== current.id && (
+      (height(candidate) > 0 && height(candidate) < height(current)) ||
+      (candidate.sizeBytes && current.sizeBytes && candidate.sizeBytes < current.sizeBytes * 0.75)
+    ))
+    .sort((a, b) => (
+      Math.abs(Math.min(height(current), 1080) - height(a)) -
+      Math.abs(Math.min(height(current), 1080) - height(b)) ||
+      (a.sizeBytes ?? Infinity) - (b.sizeBytes ?? Infinity)
+    ))[0];
+}
+
+async function play(movie, release, startAt = 0) {
   playerRequest?.abort();
   const request = new AbortController();
   playerRequest = request;
@@ -194,8 +233,10 @@ async function play(movie, release) {
   let sameSourceRelayUsed = false;
   let alternateUsed = false;
   let refreshed = false;
+  const lighter = lighterRelease(release);
 
   playback.hidden = false;
+  lighterButton.hidden = true;
   stage.replaceChildren();
   playStatus.textContent = "Finding a playable mirror…";
   playback.scrollIntoView({ block: "nearest" });
@@ -208,6 +249,31 @@ async function play(movie, release) {
     player.setAttribute("autoplay", "");
     player.setAttribute("playsinline", "");
     player.setAttribute("title", movie.title);
+    player.setAttribute("smoothwarning", "");
+    if (/\.mp4$/i.test(release.filename) && /^h\.?264$/i.test(release.codec ?? "")
+      && release.language && !/[,/+|]|multi|dual/i.test(release.language)) {
+      player.setAttribute("engine", "native wasm");
+    }
+    let bufferingTimer;
+    const offerLighter = () => {
+      if (!lighter || request.signal.aborted || !player.isConnected) return;
+      lighterButton.textContent = lighter.quality
+        ? `Switch to a lighter ${lighter.quality} release`
+        : "Switch to a lighter release";
+      lighterButton.hidden = false;
+      lighterButton.onclick = () => play(movie, lighter, Number(player.currentTime) || resumeAt);
+    };
+    player.addEventListener("smoothwarning", (event) => {
+      if (!lighter) return;
+      event.preventDefault();
+      offerLighter();
+    });
+    player.addEventListener("statechange", (event) => {
+      clearTimeout(bufferingTimer);
+      const state = event.detail?.state ?? event.detail;
+      if (state === "buffering") bufferingTimer = setTimeout(offerLighter, 3000);
+    });
+    request.signal.addEventListener("abort", () => clearTimeout(bufferingTimer), { once: true });
     if (resumeAt > 0) player.setAttribute("startat", String(resumeAt));
     const readyTimer = setTimeout(() => {
       if (player.isConnected && !request.signal.aborted) {
@@ -223,7 +289,16 @@ async function play(movie, release) {
         performance.measure(`movi:play-to-first-frame:${run}`, { start: started, end: performance.now() });
       }
       playStatus.textContent = "";
+      queueMicrotask(() => {
+        if (!player.isConnected || request.signal.aborted || !player.paused) return;
+        Promise.resolve(player.play()).catch(() => {
+          if (player.isConnected && !request.signal.aborted) playStatus.textContent = "Press Play to start.";
+        });
+      });
     }, { once: true });
+    player.addEventListener("play", () => {
+      if (player.isConnected && !request.signal.aborted) playStatus.textContent = "";
+    });
     player.addEventListener("error", async () => {
       clearTimeout(readyTimer);
       if (request.signal.aborted || !player.isConnected) return;
@@ -261,7 +336,7 @@ async function play(movie, release) {
     const reusable = warmed && candidate.expiresAt > Date.now();
     const source = reusable ? warmed : await getPlayback(release.id, request.signal);
     const receivedAt = reusable ? candidate.expiresAt - source.expiresIn * 1000 : Date.now();
-    await attach({ ...source, receivedAt });
+    await attach({ ...source, receivedAt }, source.url, startAt);
   } catch (error) {
     if (!request.signal.aborted) playStatus.textContent = error.message;
   }
