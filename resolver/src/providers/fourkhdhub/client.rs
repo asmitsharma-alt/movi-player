@@ -99,6 +99,26 @@ impl FourKHdHubClient {
         origin: &str,
         excluded: Option<&str>,
     ) -> Result<PlaybackSource, FourKHdHubError> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(14);
+        let first = self.resolve_mirrors(release, origin, excluded).await;
+        match first {
+            Err(error @ FourKHdHubError::NoPlayableMirror(_)) if excluded.is_none() => {
+                // Resolver pages issue new mirror URLs on each lookup. A bounded
+                // second lookup can recover from an expired or unavailable URL.
+                tokio::time::timeout_at(deadline, self.resolve_mirrors(release, origin, None))
+                    .await
+                    .unwrap_or(Err(error))
+            }
+            result => result,
+        }
+    }
+
+    async fn resolve_mirrors(
+        &self,
+        release: &Release,
+        origin: &str,
+        excluded: Option<&str>,
+    ) -> Result<PlaybackSource, FourKHdHubError> {
         use futures::{StreamExt, stream::FuturesUnordered};
         use std::{collections::HashSet, time::Duration};
 
