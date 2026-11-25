@@ -118,6 +118,11 @@ query.addEventListener("input", () => {
   searchTimer = setTimeout(search, 250);
 });
 
+if (!query.value) {
+  query.value = new URLSearchParams(location.search).get("q")?.slice(0, query.maxLength) ?? "";
+}
+if (query.value.trim().length >= 2) search();
+
 function warm(release) {
   if (warmRelease?.id === release.id && warmRelease.expiresAt > Date.now()) return;
   warmRequest?.abort();
